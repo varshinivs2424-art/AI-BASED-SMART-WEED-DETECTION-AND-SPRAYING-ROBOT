@@ -1,0 +1,166 @@
+from ultralytics import YOLO
+from picamera2 import Picamera2
+import cv2
+import RPi.GPIO as GPIO
+import time
+
+# ---------------- GPIO SETUP ----------------
+GPIO.setmode(GPIO.BCM)
+
+# Motors
+IN1, IN2, IN3, IN4 = 17, 18, 22, 23
+
+# Pump
+PUMP = 24
+
+# Ultrasonic
+TRIG = 5
+ECHO = 6
+
+GPIO.setup(IN1, GPIO.OUT)
+GPIO.setup(IN2, GPIO.OUT)
+GPIO.setup(IN3, GPIO.OUT)
+GPIO.setup(IN4, GPIO.OUT)
+
+GPIO.setup(PUMP, GPIO.OUT, initial=GPIO.HIGH)
+
+GPIO.setup(TRIG, GPIO.OUT)
+GPIO.setup(ECHO, GPIO.IN)
+
+# ---------------- MOTOR ----------------
+def forward():
+    GPIO.output(IN1, 1)
+    GPIO.output(IN2, 0)
+    GPIO.output(IN3, 1)
+    GPIO.output(IN4, 0)
+
+def stop():
+    GPIO.output(IN1, 0)
+    GPIO.output(IN2, 0)
+    GPIO.output(IN3, 0)
+    GPIO.output(IN4, 0)
+
+def right():
+    GPIO.output(IN1, 1)
+    GPIO.output(IN2, 0)
+    GPIO.output(IN3, 0)
+    GPIO.output(IN4, 1)
+
+# ---------------- PUMP ----------------
+def pump_on():
+    GPIO.output(PUMP, 0)
+
+def pump_off():
+    GPIO.output(PUMP, 1)
+
+# ---------------- ULTRASONIC ----------------
+def get_distance():
+    GPIO.output(TRIG, False)
+    time.sleep(0.05)
+
+    GPIO.output(TRIG, True)
+    time.sleep(0.00001)
+    GPIO.output(TRIG, False)
+
+    start = time.time()
+    stop_t = time.time()
+
+    timeout = time.time() + 0.05
+    while GPIO.input(ECHO) == 0 and time.time() < timeout:
+        start = time.time()
+
+    timeout = time.time() + 0.05
+    while GPIO.input(ECHO) == 1 and time.time() < timeout:
+        stop_t = time.time()
+
+    duration = stop_t - start
+    distance = duration * 17150
+    return round(distance, 2)
+
+# ---------------- CAMERA ----------------
+picam2 = Picamera2()
+config = picam2.create_preview_configuration()
+picam2.configure(config)
+picam2.start()
+
+# ---------------- MODEL ----------------
+model = YOLO("/home/sneha/runs/detect/train6/weights/best.pt")
+
+try:
+    while True:
+
+        # Capture frame
+        frame = picam2.capture_array()
+        frame = frame[:, :, :3]
+        frame = frame.copy()
+
+        # OBSTACLE CHECK
+        distance = get_distance()
+        print("Distance:", distance)
+
+        if distance < 20:
+            print("OBSTACLE")
+
+            stop()
+            time.sleep(0.3)
+
+            right()
+            time.sleep(0.8)
+
+            forward()
+
+            cv2.putText(frame, "OBSTACLE", (50, 50),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1,
+                        (0, 0, 255), 2)
+
+            cv2.imshow("Robot View", frame)
+            cv2.waitKey(1)
+            continue
+
+        # YOLO DETECTION (LESS BOXES)
+        results = model(frame, conf=0.5, iou=0.4)
+        annotated = results[0].plot()
+
+        weed_detected = False
+        crop_detected = False
+
+        for box in results[0].boxes:
+            label = model.names[int(box.cls[0])].lower()
+
+            if "weed" in label:
+                weed_detected = True
+            elif "crop" in label:
+                crop_detected = True
+
+        # ---------------- LOGIC ----------------
+        pump_off()
+
+        if weed_detected:
+            print("WEED → SPRAY")
+
+            stop()
+            time.sleep(0.5)
+
+            pump_on()
+            time.sleep(2)
+
+            pump_off()
+            forward()
+
+        else:
+            forward()
+
+        # ---------------- DISPLAY ----------------
+        cv2.imshow("Robot View", annotated)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+except KeyboardInterrupt:
+    print("Stopped")
+
+finally:
+    pump_off()
+    stop()
+    GPIO.cleanup()
+    cv2.destroyAllWindows()
